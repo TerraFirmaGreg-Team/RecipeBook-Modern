@@ -26,6 +26,11 @@ on:
         description: Export bundle id (deploy only)
         required: false
         default: ""
+      force_export:
+        description: Re-export EMI bundle even if modpack/MWE unchanged
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: recipe-book-${{ github.ref }}
@@ -47,13 +52,12 @@ jobs:
         env:
           MODPACK_TAG: ${{ github.event.inputs.modpack_tag }}
           MWE_TAG: ${{ github.event.inputs.mwe_version }}
+          FORCE_EXPORT: ${{ github.event.inputs.force_export }}
         run: bash ci/run.sh check-build-changes
 
   export:
     needs: check
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      needs.check.outputs.export_needed == 'true'
+    if: needs.check.outputs.export_needed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -183,7 +187,6 @@ jobs:
       needs.export.result != 'failure' &&
       needs.export.result != 'cancelled' &&
       (
-        github.event_name == 'workflow_dispatch' ||
         github.event_name == 'push' ||
         needs.check.outputs.deploy_needed == 'true'
       )

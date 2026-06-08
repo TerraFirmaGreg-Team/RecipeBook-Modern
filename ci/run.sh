@@ -272,16 +272,10 @@ check_build_changes() {
   resolve_build_version_refs || exit 1
   fetch_recorded_build_json "$build_json"
 
-  if [[ "${GITHUB_EVENT_NAME:-}" == "workflow_dispatch" ]]; then
-    echo "Manual run — skip build.json gate" >&2
-    rm -f "$build_json"
-    _write_check_build_outputs true true true
-    return 0
-  fi
-
   node -e "
 const fs = require('fs');
 const path = process.argv[1];
+const forceExport = process.env.FORCE_EXPORT === 'true';
 const current = {
   modpack: process.argv[2],
   'minecraft-web-export': process.argv[3],
@@ -298,8 +292,9 @@ if (fs.existsSync(path)) {
 const keys = Object.keys(current);
 const differs = (k) => String(recorded[k] ?? '') !== String(current[k] ?? '');
 const hasRecorded = Object.keys(recorded).length > 0;
-const exportNeeded = !hasRecorded || exportKeys.some(differs);
-const deployNeeded = !hasRecorded || keys.some(differs);
+let exportNeeded = !hasRecorded || exportKeys.some(differs);
+if (forceExport) exportNeeded = true;
+const deployNeeded = !hasRecorded || keys.some(differs) || forceExport;
 const changed = deployNeeded;
 const lines = [
   'export_needed=' + exportNeeded,

@@ -205,7 +205,41 @@ resolve_build_version_refs() {
   BUILD_REF_RENDERER="$(_normalize_version_ref "$(resolve_renderer_version)")" || return 1
   BUILD_REF_OPTIMIZE="$(_normalize_version_ref "$(resolve_optimize_version)")" || return 1
   BUILD_REF_HMC="$(_normalize_version_ref "$(resolve_hmc_version)")" || return 1
-  BUILD_REF_REPO="$(git -C "$RBM_ROOT" rev-parse HEAD)"
+}
+
+resolve_build_json_url() {
+  if [[ -n "${BUILD_JSON_URL:-}" ]]; then
+    echo "$BUILD_JSON_URL"
+    return 0
+  fi
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+    echo "https://${GITHUB_REPOSITORY%/*}.github.io/${GITHUB_REPOSITORY#*/}/build.json"
+    return 0
+  fi
+  return 1
+}
+
+# Last published versions: live site URL, then local site/build.json, else empty.
+fetch_recorded_build_json() {
+  local dest="${1:?dest path required}"
+  local url local_site
+
+  if url="$(resolve_build_json_url 2>/dev/null)"; then
+    if curl -fsSL --retry 2 --retry-delay 1 "$url" -o "$dest" 2>/dev/null; then
+      echo "Loaded published build.json from ${url}"
+      return 0
+    fi
+    echo "No published build.json at ${url} — first deploy or site not ready"
+  fi
+
+  local_site="${RBM_ROOT}/${SITE_OUTPUT_DIR:-site}/build.json"
+  if [[ -f "$local_site" ]]; then
+    cp "$local_site" "$dest"
+    echo "Using local ${local_site}"
+    return 0
+  fi
+
+  echo '{}' > "$dest"
 }
 
 _write_build_versions_json() {
@@ -220,7 +254,6 @@ const data = {
   'emi-recipe-renderer': process.argv[4],
   'emi-bundle-optimize': process.argv[5],
   headlessmc: process.argv[6],
-  'recipebook-modern': process.argv[8],
 };
 fs.writeFileSync(process.argv[7], JSON.stringify(data, null, 2) + '\n');
 " \
@@ -230,16 +263,18 @@ fs.writeFileSync(process.argv[7], JSON.stringify(data, null, 2) + '\n');
     "$BUILD_REF_RENDERER" \
     "$BUILD_REF_OPTIMIZE" \
     "$BUILD_REF_HMC" \
-    "$out" \
-    "$BUILD_REF_REPO"
+    "$out"
 }
 
 check_build_changes() {
-  local build_json="${BUILD_JSON:-$RBM_ROOT/build.json}"
+  local build_json
+  build_json="$(mktemp)"
   resolve_build_version_refs || exit 1
+  fetch_recorded_build_json "$build_json"
 
   if [[ "${GITHUB_EVENT_NAME:-}" == "workflow_dispatch" ]]; then
     echo "Manual run — skip build.json gate"
+    rm -f "$build_json"
     printf '%s\n' \
       "export_needed=true" \
       "deploy_needed=true" \
@@ -257,7 +292,6 @@ const current = {
   'emi-recipe-renderer': process.argv[5],
   'emi-bundle-optimize': process.argv[6],
   headlessmc: process.argv[7],
-  'recipebook-modern': process.argv[8],
 };
 const exportKeys = ['modpack', 'minecraft-web-export'];
 let recorded = {};
@@ -266,8 +300,9 @@ if (fs.existsSync(path)) {
 }
 const keys = Object.keys(current);
 const differs = (k) => String(recorded[k] ?? '') !== String(current[k] ?? '');
-const exportNeeded = !fs.existsSync(path) || exportKeys.some(differs);
-const deployNeeded = !fs.existsSync(path) || keys.some(differs);
+const hasRecorded = Object.keys(recorded).length > 0;
+const exportNeeded = !hasRecorded || exportKeys.some(differs);
+const deployNeeded = !hasRecorded || keys.some(differs);
 const changed = deployNeeded;
 const lines = [
   'export_needed=' + exportNeeded,
@@ -279,13 +314,13 @@ for (const k of keys) {
 }
 process.stdout.write(lines.join('\n') + '\n');
 if (deployNeeded) {
-  console.error('::group::build.json diff');
+  console.error('::group::build.json diff (published site)');
   for (const k of keys) {
     console.error(k + ': recorded=' + (recorded[k] ?? '<none>') + ' current=' + current[k]);
   }
   console.error('::endgroup::');
 } else {
-  console.log('build.json matches resolved versions — nothing to do');
+  console.log('Published build.json matches resolved versions — nothing to do');
 }
 " \
     "$build_json" \
@@ -294,47 +329,17 @@ if (deployNeeded) {
     "$BUILD_REF_SITE" \
     "$BUILD_REF_RENDERER" \
     "$BUILD_REF_OPTIMIZE" \
-    "$BUILD_REF_HMC" \
-    "$BUILD_REF_REPO"
+    "$BUILD_REF_HMC"
+  rm -f "$build_json"
 }
 
 record_build_versions() {
-  local build_json="${BUILD_JSON:-$RBM_ROOT/build.json}"
+  local site_dir="${RBM_ROOT}/${SITE_OUTPUT_DIR:-site}"
+  local build_json="${BUILD_JSON:-$site_dir/build.json}"
+  mkdir -p "$site_dir"
   _write_build_versions_json "$build_json"
-  echo "Recorded build versions → ${build_json}"
+  echo "Recorded build versions → ${build_json} (deployed with site)"
   cat "$build_json"
-}
-
-commit_build_json() {
-  local build_json="${BUILD_JSON:-$RBM_ROOT/build.json}"
-
-  if [[ ! -f "$build_json" ]]; then
-    echo "::error::Missing ${build_json}" >&2
-    return 1
-  fi
-
-  cd "$RBM_ROOT"
-  git config user.name "github-actions[bot]"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-  git add "$build_json"
-
-  if git diff --staged --quiet; then
-    echo "build.json unchanged — skip commit"
-    return 0
-  fi
-
-  git commit -m "$(cat <<'EOF'
-ci: update build.json
-
-Record resolved dependency versions after a successful deploy.
-EOF
-)"
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME:-main}"
-  else
-    git push
-  fi
-  echo "Committed and pushed build.json"
 }
 
 print_versions() {
@@ -1042,7 +1047,7 @@ Granular (local debugging):
   resolve-bundle-id, extract-bundle, fetch-bundle, verify-emi-bundle,
   fetch-viewer-site, optimize-and-stage, assemble-deploy-site,
   collect-export-debug, resolve-release-tag,
-  check-build-changes, record-build-versions, commit-build-json
+  check-build-changes, record-build-versions
 EOF
 }
 
@@ -1082,7 +1087,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     resolve-release-tag) resolve_release_tag "$@" ;;
     check-build-changes) check_build_changes "$@" ;;
     record-build-versions) record_build_versions "$@" ;;
-    commit-build-json) commit_build_json "$@" ;;
     -h|--help|help) usage ;;
     *)
       echo "::error::Unknown command: $cmd" >&2

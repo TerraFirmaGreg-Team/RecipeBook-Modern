@@ -149,7 +149,7 @@ load_config() {
   export EXPORT_RAW EXPORT_BUNDLE EXPORT_OPT_STAGING
   export EXPORT_RAW_DIR EXPORT_BUNDLE_SUBDIR EXPORT_OPT_DIR SITE_OUTPUT_DIR
   export EXPORT_ARTIFACT_NAME="${EXPORT_ARTIFACT_NAME:-recipe-book}"
-  export EXPORT_WORKFLOW_NAME="${EXPORT_WORKFLOW_NAME:-Export EMI bundle}"
+  export EXPORT_WORKFLOW_NAME="${EXPORT_WORKFLOW_NAME:-Build recipe book}"
 
   if [[ -n "${GITHUB_ENV:-}" ]]; then
     {
@@ -182,9 +182,159 @@ load_config() {
       printf 'EXPORT_OPT_STAGING=%s\n' "$EXPORT_OPT_STAGING"
       printf 'SITE_OUTPUT_DIR=%s\n' "$SITE_OUTPUT_DIR"
       printf 'EXPORT_ARTIFACT_NAME=%s\n' "${EXPORT_ARTIFACT_NAME:-recipe-book}"
-      printf 'EXPORT_WORKFLOW_NAME=%s\n' "${EXPORT_WORKFLOW_NAME:-Export EMI bundle}"
+      printf 'EXPORT_WORKFLOW_NAME=%s\n' "${EXPORT_WORKFLOW_NAME:-Build recipe book}"
     } >> "$GITHUB_ENV"
   fi
+}
+
+_normalize_version_ref() {
+  echo "${1#v}"
+}
+
+# Resolve dependency refs for build.json (semver tags without leading v).
+resolve_build_version_refs() {
+  load_config
+
+  if [[ -z "${MODPACK_TAG:-}" ]]; then
+    unset MODPACK_TAG
+  fi
+
+  BUILD_REF_MODPACK="$(_normalize_version_ref "$(resolve_modpack_tag)")" || return 1
+  BUILD_REF_MWE="$(_normalize_version_ref "$(resolve_mwe_tag)")" || return 1
+  BUILD_REF_SITE="$(_normalize_version_ref "$(resolve_site_viewer_version)")" || return 1
+  BUILD_REF_RENDERER="$(_normalize_version_ref "$(resolve_renderer_version)")" || return 1
+  BUILD_REF_OPTIMIZE="$(_normalize_version_ref "$(resolve_optimize_version)")" || return 1
+  BUILD_REF_HMC="$(_normalize_version_ref "$(resolve_hmc_version)")" || return 1
+  BUILD_REF_REPO="$(git -C "$RBM_ROOT" rev-parse HEAD)"
+}
+
+_write_build_versions_json() {
+  local out="${1:?output path required}"
+  resolve_build_version_refs || return 1
+  node -e "
+const fs = require('fs');
+const data = {
+  modpack: process.argv[1],
+  'minecraft-web-export': process.argv[2],
+  'recipe-viewer-react': process.argv[3],
+  'emi-recipe-renderer': process.argv[4],
+  'emi-bundle-optimize': process.argv[5],
+  headlessmc: process.argv[6],
+  'recipebook-modern': process.argv[8],
+};
+fs.writeFileSync(process.argv[7], JSON.stringify(data, null, 2) + '\n');
+" \
+    "$BUILD_REF_MODPACK" \
+    "$BUILD_REF_MWE" \
+    "$BUILD_REF_SITE" \
+    "$BUILD_REF_RENDERER" \
+    "$BUILD_REF_OPTIMIZE" \
+    "$BUILD_REF_HMC" \
+    "$out" \
+    "$BUILD_REF_REPO"
+}
+
+check_build_changes() {
+  local build_json="${BUILD_JSON:-$RBM_ROOT/build.json}"
+  resolve_build_version_refs || exit 1
+
+  if [[ "${GITHUB_EVENT_NAME:-}" == "workflow_dispatch" ]]; then
+    echo "Manual run — skip build.json gate"
+    printf '%s\n' \
+      "export_needed=true" \
+      "deploy_needed=true" \
+      "changed=true"
+    return 0
+  fi
+
+  node -e "
+const fs = require('fs');
+const path = process.argv[1];
+const current = {
+  modpack: process.argv[2],
+  'minecraft-web-export': process.argv[3],
+  'recipe-viewer-react': process.argv[4],
+  'emi-recipe-renderer': process.argv[5],
+  'emi-bundle-optimize': process.argv[6],
+  headlessmc: process.argv[7],
+  'recipebook-modern': process.argv[8],
+};
+const exportKeys = ['modpack', 'minecraft-web-export'];
+let recorded = {};
+if (fs.existsSync(path)) {
+  try { recorded = JSON.parse(fs.readFileSync(path, 'utf8')); } catch { recorded = {}; }
+}
+const keys = Object.keys(current);
+const differs = (k) => String(recorded[k] ?? '') !== String(current[k] ?? '');
+const exportNeeded = !fs.existsSync(path) || exportKeys.some(differs);
+const deployNeeded = !fs.existsSync(path) || keys.some(differs);
+const changed = deployNeeded;
+const lines = [
+  'export_needed=' + exportNeeded,
+  'deploy_needed=' + deployNeeded,
+  'changed=' + changed,
+];
+for (const k of keys) {
+  if (differs(k)) lines.push('changed_' + k.replace(/[^a-z0-9]+/gi, '_') + '=true');
+}
+process.stdout.write(lines.join('\n') + '\n');
+if (deployNeeded) {
+  console.error('::group::build.json diff');
+  for (const k of keys) {
+    console.error(k + ': recorded=' + (recorded[k] ?? '<none>') + ' current=' + current[k]);
+  }
+  console.error('::endgroup::');
+} else {
+  console.log('build.json matches resolved versions — nothing to do');
+}
+" \
+    "$build_json" \
+    "$BUILD_REF_MODPACK" \
+    "$BUILD_REF_MWE" \
+    "$BUILD_REF_SITE" \
+    "$BUILD_REF_RENDERER" \
+    "$BUILD_REF_OPTIMIZE" \
+    "$BUILD_REF_HMC" \
+    "$BUILD_REF_REPO"
+}
+
+record_build_versions() {
+  local build_json="${BUILD_JSON:-$RBM_ROOT/build.json}"
+  _write_build_versions_json "$build_json"
+  echo "Recorded build versions → ${build_json}"
+  cat "$build_json"
+}
+
+commit_build_json() {
+  local build_json="${BUILD_JSON:-$RBM_ROOT/build.json}"
+
+  if [[ ! -f "$build_json" ]]; then
+    echo "::error::Missing ${build_json}" >&2
+    return 1
+  fi
+
+  cd "$RBM_ROOT"
+  git config user.name "github-actions[bot]"
+  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+  git add "$build_json"
+
+  if git diff --staged --quiet; then
+    echo "build.json unchanged — skip commit"
+    return 0
+  fi
+
+  git commit -m "$(cat <<'EOF'
+ci: update build.json
+
+Record resolved dependency versions after a successful deploy.
+EOF
+)"
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME:-main}"
+  else
+    git push
+  fi
+  echo "Committed and pushed build.json"
 }
 
 print_versions() {
@@ -717,7 +867,7 @@ fetch_bundle() {
   fi
 
   local artifact_name="${EXPORT_ARTIFACT_NAME:-recipe-book}"
-  local workflow_name="${EXPORT_WORKFLOW_NAME:-Export EMI bundle}"
+  local workflow_name="${EXPORT_WORKFLOW_NAME:-Build recipe book}"
 
   local run_id
   run_id="$(
@@ -891,7 +1041,8 @@ Granular (local debugging):
   prep-node, install-mods, setup-hmc, launch-export, write-export-meta,
   resolve-bundle-id, extract-bundle, fetch-bundle, verify-emi-bundle,
   fetch-viewer-site, optimize-and-stage, assemble-deploy-site,
-  collect-export-debug, resolve-release-tag
+  collect-export-debug, resolve-release-tag,
+  check-build-changes, record-build-versions, commit-build-json
 EOF
 }
 
@@ -929,6 +1080,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     build-site) build_site "$@" ;;
     collect-export-debug) collect_export_debug "${1:-}" ;;
     resolve-release-tag) resolve_release_tag "$@" ;;
+    check-build-changes) check_build_changes "$@" ;;
+    record-build-versions) record_build_versions "$@" ;;
+    commit-build-json) commit_build_json "$@" ;;
     -h|--help|help) usage ;;
     *)
       echo "::error::Unknown command: $cmd" >&2

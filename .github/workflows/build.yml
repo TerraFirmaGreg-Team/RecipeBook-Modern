@@ -47,7 +47,7 @@ jobs:
         env:
           MODPACK_TAG: ${{ github.event.inputs.modpack_tag }}
           MWE_TAG: ${{ github.event.inputs.mwe_version }}
-        run: bash ci/run.sh check-build-changes >> "$GITHUB_OUTPUT"
+        run: bash ci/run.sh check-build-changes
 
   export:
     needs: check

@@ -226,16 +226,16 @@ fetch_recorded_build_json() {
 
   if url="$(resolve_build_json_url 2>/dev/null)"; then
     if curl -fsSL --retry 2 --retry-delay 1 "$url" -o "$dest" 2>/dev/null; then
-      echo "Loaded published build.json from ${url}"
+      echo "Loaded published build.json from ${url}" >&2
       return 0
     fi
-    echo "No published build.json at ${url} — first deploy or site not ready"
+    echo "No published build.json at ${url} — first deploy or site not ready" >&2
   fi
 
   local_site="${RBM_ROOT}/${SITE_OUTPUT_DIR:-site}/build.json"
   if [[ -f "$local_site" ]]; then
     cp "$local_site" "$dest"
-    echo "Using local ${local_site}"
+    echo "Using local ${local_site}" >&2
     return 0
   fi
 
@@ -273,12 +273,9 @@ check_build_changes() {
   fetch_recorded_build_json "$build_json"
 
   if [[ "${GITHUB_EVENT_NAME:-}" == "workflow_dispatch" ]]; then
-    echo "Manual run — skip build.json gate"
+    echo "Manual run — skip build.json gate" >&2
     rm -f "$build_json"
-    printf '%s\n' \
-      "export_needed=true" \
-      "deploy_needed=true" \
-      "changed=true"
+    _write_check_build_outputs true true true
     return 0
   fi
 
@@ -312,7 +309,13 @@ const lines = [
 for (const k of keys) {
   if (differs(k)) lines.push('changed_' + k.replace(/[^a-z0-9]+/gi, '_') + '=true');
 }
-process.stdout.write(lines.join('\n') + '\n');
+const outPath = process.env.GITHUB_OUTPUT;
+const payload = lines.join('\n') + '\n';
+if (outPath) {
+  fs.appendFileSync(outPath, payload);
+} else {
+  process.stdout.write(payload);
+}
 if (deployNeeded) {
   console.error('::group::build.json diff (published site)');
   for (const k of keys) {
@@ -320,7 +323,7 @@ if (deployNeeded) {
   }
   console.error('::endgroup::');
 } else {
-  console.log('Published build.json matches resolved versions — nothing to do');
+  console.error('Published build.json matches resolved versions — nothing to do');
 }
 " \
     "$build_json" \
@@ -331,6 +334,25 @@ if (deployNeeded) {
     "$BUILD_REF_OPTIMIZE" \
     "$BUILD_REF_HMC"
   rm -f "$build_json"
+}
+
+_write_check_build_outputs() {
+  local export_needed="${1:?}" deploy_needed="${2:?}" changed="${3:?}"
+  shift 3
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    {
+      printf 'export_needed=%s\n' "$export_needed"
+      printf 'deploy_needed=%s\n' "$deploy_needed"
+      printf 'changed=%s\n' "$changed"
+      if (($# > 0)); then printf '%s\n' "$@"; fi
+    } >> "$GITHUB_OUTPUT"
+  else
+    printf '%s\n' \
+      "export_needed=${export_needed}" \
+      "deploy_needed=${deploy_needed}" \
+      "changed=${changed}" \
+      "$@"
+  fi
 }
 
 record_build_versions() {

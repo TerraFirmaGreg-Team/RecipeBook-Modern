@@ -193,7 +193,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
-      contents: read
+      contents: write
       pages: write
       id-token: write
       actions: read
@@ -248,7 +248,15 @@ jobs:
         run: bash ci/run.sh build-site
 
       - name: Record build versions
+        env:
+          BUNDLE_ID: ${{ steps.metadata.outputs.bundle_id }}
         run: bash ci/run.sh record-build-versions
+
+      - name: Publish site release
+        env:
+          BUNDLE_ID: ${{ steps.metadata.outputs.bundle_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/run.sh publish-site-release
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

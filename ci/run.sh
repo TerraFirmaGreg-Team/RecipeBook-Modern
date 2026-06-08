@@ -244,10 +244,25 @@ fetch_recorded_build_json() {
 
 _write_build_versions_json() {
   local out="${1:?output path required}"
+  local bundle_id="${BUNDLE_ID:?BUNDLE_ID required}"
+  local hash_len="${SITE_RELEASE_HASH_LENGTH:-7}"
   resolve_build_version_refs || return 1
   node -e "
+const crypto = require('crypto');
 const fs = require('fs');
-const data = {
+
+const VERSION_KEYS = [
+  'modpack',
+  'minecraft-web-export',
+  'recipe-viewer-react',
+  'emi-recipe-renderer',
+  'emi-bundle-optimize',
+  'headlessmc',
+];
+
+const bundleId = process.argv[7];
+const hashLen = Math.max(4, parseInt(process.argv[8], 10) || 7);
+const versions = {
   modpack: process.argv[1],
   'minecraft-web-export': process.argv[2],
   'recipe-viewer-react': process.argv[3],
@@ -255,7 +270,17 @@ const data = {
   'emi-bundle-optimize': process.argv[5],
   headlessmc: process.argv[6],
 };
-fs.writeFileSync(process.argv[7], JSON.stringify(data, null, 2) + '\n');
+
+const fingerprint = {};
+for (const key of VERSION_KEYS) {
+  fingerprint[key] = versions[key];
+}
+const canonical = JSON.stringify(fingerprint);
+const contentHash = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, hashLen);
+const releaseTag = 'site-' + bundleId + '-' + contentHash;
+
+const data = { ...versions, contentHash, releaseTag };
+fs.writeFileSync(process.argv[9], JSON.stringify(data, null, 2) + '\n');
 " \
     "$BUILD_REF_MODPACK" \
     "$BUILD_REF_MWE" \
@@ -263,6 +288,8 @@ fs.writeFileSync(process.argv[7], JSON.stringify(data, null, 2) + '\n');
     "$BUILD_REF_RENDERER" \
     "$BUILD_REF_OPTIMIZE" \
     "$BUILD_REF_HMC" \
+    "$bundle_id" \
+    "$hash_len" \
     "$out"
 }
 
@@ -357,6 +384,72 @@ record_build_versions() {
   _write_build_versions_json "$build_json"
   echo "Recorded build versions → ${build_json} (deployed with site)"
   cat "$build_json"
+}
+
+publish_site_release() {
+  load_config
+
+  local site_dir="${RBM_ROOT}/${SITE_OUTPUT_DIR:-site}"
+  local build_json="$site_dir/build.json"
+  local asset_name="${SITE_RELEASE_ASSET_NAME:-recipe-book-site.tar}"
+  local archive="$RBM_ROOT/$asset_name"
+  local release_tag notes
+
+  if [[ ! -f "$build_json" ]]; then
+    echo "::error::Missing ${build_json} — run record-build-versions first" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$site_dir/index.html" ]]; then
+    echo "::error::Missing ${site_dir}/index.html — run build-site first" >&2
+    exit 1
+  fi
+
+  release_tag="$(
+    node -e "
+const fs = require('fs');
+const build = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+if (!build.releaseTag) {
+  console.error('::error::build.json missing releaseTag — run record-build-versions first');
+  process.exit(1);
+}
+process.stdout.write(String(build.releaseTag));
+" "$build_json"
+  )"
+
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "::error::gh CLI required to publish site release" >&2
+    exit 1
+  fi
+
+  if [[ -z "${GH_TOKEN:-}" ]]; then
+    echo "::error::GH_TOKEN is required to publish site release" >&2
+    exit 1
+  fi
+
+  echo "::group::Package site release (${release_tag})"
+  rm -f "$archive"
+  tar -cf "$archive" -C "$site_dir" .
+  echo "Created ${archive} ($(du -h "$archive" | awk '{print $1}'))"
+  echo "::endgroup::"
+
+  if gh release view "$release_tag" --repo "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}" >/dev/null 2>&1; then
+    echo "Release ${release_tag} already exists — skipping upload"
+    rm -f "$archive"
+    return 0
+  fi
+
+  notes="$(mktemp)"
+  cp "$build_json" "$notes"
+
+  echo "::group::Create GitHub Release ${release_tag}"
+  gh release create "$release_tag" "$archive" \
+    --repo "${GITHUB_REPOSITORY}" \
+    --title "Recipe book site ${release_tag}" \
+    --notes-file "$notes"
+  rm -f "$notes" "$archive"
+  echo "Published ${asset_name} → release ${release_tag}"
+  echo "::endgroup::"
 }
 
 print_versions() {
@@ -1064,7 +1157,7 @@ Granular (local debugging):
   resolve-bundle-id, extract-bundle, fetch-bundle, verify-emi-bundle,
   fetch-viewer-site, optimize-and-stage, assemble-deploy-site,
   collect-export-debug, resolve-release-tag,
-  check-build-changes, record-build-versions
+  check-build-changes, record-build-versions, publish-site-release
 EOF
 }
 
@@ -1104,6 +1197,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     resolve-release-tag) resolve_release_tag "$@" ;;
     check-build-changes) check_build_changes "$@" ;;
     record-build-versions) record_build_versions "$@" ;;
+    publish-site-release) publish_site_release "$@" ;;
     -h|--help|help) usage ;;
     *)
       echo "::error::Unknown command: $cmd" >&2

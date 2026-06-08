@@ -4,7 +4,12 @@
 set -euo pipefail
 
 CI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CI_SCRIPTS="${CI_DIR}/scripts"
 RBM_ROOT="$(cd "$CI_DIR/.." && pwd)"
+
+ci_node() {
+  node "$CI_SCRIPTS/$1" "${@:2}"
+}
 
 # --- GitHub semver release resolution ---
 
@@ -148,8 +153,7 @@ load_config() {
   export EXPORT_WARMUP_TICKS EXPORT_TIMEOUT_SECONDS
   export EXPORT_RAW EXPORT_BUNDLE EXPORT_OPT_STAGING
   export EXPORT_RAW_DIR EXPORT_BUNDLE_SUBDIR EXPORT_OPT_DIR SITE_OUTPUT_DIR
-  export EXPORT_ARTIFACT_NAME="${EXPORT_ARTIFACT_NAME:-recipe-book}"
-  export EXPORT_WORKFLOW_NAME="${EXPORT_WORKFLOW_NAME:-Build recipe book}"
+  export EXPORT_CACHE_KEY_PREFIX="${EXPORT_CACHE_KEY_PREFIX:-emi-export}"
 
   if [[ -n "${GITHUB_ENV:-}" ]]; then
     {
@@ -181,8 +185,7 @@ load_config() {
       printf 'EXPORT_BUNDLE=%s\n' "$EXPORT_BUNDLE"
       printf 'EXPORT_OPT_STAGING=%s\n' "$EXPORT_OPT_STAGING"
       printf 'SITE_OUTPUT_DIR=%s\n' "$SITE_OUTPUT_DIR"
-      printf 'EXPORT_ARTIFACT_NAME=%s\n' "${EXPORT_ARTIFACT_NAME:-recipe-book}"
-      printf 'EXPORT_WORKFLOW_NAME=%s\n' "${EXPORT_WORKFLOW_NAME:-Build recipe book}"
+      printf 'EXPORT_CACHE_KEY_PREFIX=%s\n' "${EXPORT_CACHE_KEY_PREFIX:-emi-export}"
     } >> "$GITHUB_ENV"
   fi
 }
@@ -247,41 +250,7 @@ _write_build_versions_json() {
   local bundle_id="${BUNDLE_ID:?BUNDLE_ID required}"
   local hash_len="${SITE_RELEASE_HASH_LENGTH:-7}"
   resolve_build_version_refs || return 1
-  node -e "
-const crypto = require('crypto');
-const fs = require('fs');
-
-const VERSION_KEYS = [
-  'modpack',
-  'minecraft-web-export',
-  'recipe-viewer-react',
-  'emi-recipe-renderer',
-  'emi-bundle-optimize',
-  'headlessmc',
-];
-
-const bundleId = process.argv[7];
-const hashLen = Math.max(4, parseInt(process.argv[8], 10) || 7);
-const versions = {
-  modpack: process.argv[1],
-  'minecraft-web-export': process.argv[2],
-  'recipe-viewer-react': process.argv[3],
-  'emi-recipe-renderer': process.argv[4],
-  'emi-bundle-optimize': process.argv[5],
-  headlessmc: process.argv[6],
-};
-
-const fingerprint = {};
-for (const key of VERSION_KEYS) {
-  fingerprint[key] = versions[key];
-}
-const canonical = JSON.stringify(fingerprint);
-const contentHash = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, hashLen);
-const releaseTag = 'site-' + bundleId + '-' + contentHash;
-
-const data = { ...versions, contentHash, releaseTag };
-fs.writeFileSync(process.argv[9], JSON.stringify(data, null, 2) + '\n');
-" \
+  ci_node write-build-versions.mjs \
     "$BUILD_REF_MODPACK" \
     "$BUILD_REF_MWE" \
     "$BUILD_REF_SITE" \
@@ -299,55 +268,7 @@ check_build_changes() {
   resolve_build_version_refs || exit 1
   fetch_recorded_build_json "$build_json"
 
-  node -e "
-const fs = require('fs');
-const path = process.argv[1];
-const forceExport = process.env.FORCE_EXPORT === 'true';
-const current = {
-  modpack: process.argv[2],
-  'minecraft-web-export': process.argv[3],
-  'recipe-viewer-react': process.argv[4],
-  'emi-recipe-renderer': process.argv[5],
-  'emi-bundle-optimize': process.argv[6],
-  headlessmc: process.argv[7],
-};
-const exportKeys = ['modpack', 'minecraft-web-export'];
-let recorded = {};
-if (fs.existsSync(path)) {
-  try { recorded = JSON.parse(fs.readFileSync(path, 'utf8')); } catch { recorded = {}; }
-}
-const keys = Object.keys(current);
-const differs = (k) => String(recorded[k] ?? '') !== String(current[k] ?? '');
-const hasRecorded = Object.keys(recorded).length > 0;
-let exportNeeded = !hasRecorded || exportKeys.some(differs);
-if (forceExport) exportNeeded = true;
-const deployNeeded = !hasRecorded || keys.some(differs) || forceExport;
-const changed = deployNeeded;
-const lines = [
-  'export_needed=' + exportNeeded,
-  'deploy_needed=' + deployNeeded,
-  'changed=' + changed,
-];
-for (const k of keys) {
-  if (differs(k)) lines.push('changed_' + k.replace(/[^a-z0-9]+/gi, '_') + '=true');
-}
-const outPath = process.env.GITHUB_OUTPUT;
-const payload = lines.join('\n') + '\n';
-if (outPath) {
-  fs.appendFileSync(outPath, payload);
-} else {
-  process.stdout.write(payload);
-}
-if (deployNeeded) {
-  console.error('::group::build.json diff (published site)');
-  for (const k of keys) {
-    console.error(k + ': recorded=' + (recorded[k] ?? '<none>') + ' current=' + current[k]);
-  }
-  console.error('::endgroup::');
-} else {
-  console.error('Published build.json matches resolved versions — nothing to do');
-}
-" \
+  ci_node check-build-changes.mjs \
     "$build_json" \
     "$BUILD_REF_MODPACK" \
     "$BUILD_REF_MWE" \
@@ -356,25 +277,6 @@ if (deployNeeded) {
     "$BUILD_REF_OPTIMIZE" \
     "$BUILD_REF_HMC"
   rm -f "$build_json"
-}
-
-_write_check_build_outputs() {
-  local export_needed="${1:?}" deploy_needed="${2:?}" changed="${3:?}"
-  shift 3
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    {
-      printf 'export_needed=%s\n' "$export_needed"
-      printf 'deploy_needed=%s\n' "$deploy_needed"
-      printf 'changed=%s\n' "$changed"
-      if (($# > 0)); then printf '%s\n' "$@"; fi
-    } >> "$GITHUB_OUTPUT"
-  else
-    printf '%s\n' \
-      "export_needed=${export_needed}" \
-      "deploy_needed=${deploy_needed}" \
-      "changed=${changed}" \
-      "$@"
-  fi
 }
 
 record_build_versions() {
@@ -405,17 +307,7 @@ publish_site_release() {
     exit 1
   fi
 
-  release_tag="$(
-    node -e "
-const fs = require('fs');
-const build = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
-if (!build.releaseTag) {
-  console.error('::error::build.json missing releaseTag — run record-build-versions first');
-  process.exit(1);
-}
-process.stdout.write(String(build.releaseTag));
-" "$build_json"
-  )"
+  release_tag="$(ci_node read-release-tag.mjs "$build_json")"
 
   if ! command -v gh >/dev/null 2>&1; then
     echo "::error::gh CLI required to publish site release" >&2
@@ -590,17 +482,70 @@ checkout_modpack() {
   fi
 }
 
-prepare_bundle_id() {
-  local tag="${MODPACK_TAG:?MODPACK_TAG required}"
-  local id="tfg-${tag}"
+export_cache_key() {
+  local bundle_id="${1:?bundle_id required}"
+  printf '%s-%s' "${EXPORT_CACHE_KEY_PREFIX:-emi-export}" "$bundle_id"
+}
+
+bundle_id_for_tag() {
+  printf 'tfg-%s' "${1:?modpack tag required}"
+}
+
+_write_bundle_outputs() {
+  local tag="${1:?modpack tag required}"
+  local label="${2:-bundle}"
+  local id cache_key
+
+  id="$(bundle_id_for_tag "$tag")"
+  cache_key="$(export_cache_key "$id")"
+  export MODPACK_TAG="$tag"
+  export BUNDLE_ID="$id"
 
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
       echo "bundle_id=${id}"
       echo "modpack_tag=${tag}"
+      echo "export_cache_key=${cache_key}"
     } >> "$GITHUB_OUTPUT"
   fi
-  echo "bundle_id=${id} (modpack @ ${tag})"
+  if [[ -n "${GITHUB_ENV:-}" ]]; then
+    printf 'BUNDLE_ID=%s\n' "$id" >> "$GITHUB_ENV"
+  fi
+  echo "${label} bundle_id=${id} export_cache_key=${cache_key}"
+}
+
+prepare_bundle_id() {
+  _write_bundle_outputs "${MODPACK_TAG:?MODPACK_TAG required}" "export"
+}
+
+prepare_check_bundle() {
+  load_config
+  local tag="${MODPACK_TAG:-}"
+
+  if [[ -z "$tag" ]]; then
+    tag="$(resolve_modpack_tag)" || exit 1
+  fi
+  _write_bundle_outputs "$tag" "check"
+}
+
+finalize_export_decision() {
+  local export_needed=false
+
+  if [[ "${VERSION_EXPORT_NEEDED:-false}" == "true" ]]; then
+    export_needed=true
+    echo "Export required: version gate" >&2
+  elif [[ "${EXPORT_CACHE_HIT:-}" != "true" ]]; then
+    export_needed=true
+    echo "Export required: cache miss (${EXPORT_CACHE_KEY:-<unset>})" >&2
+  else
+    echo "Export skipped: versions unchanged and export cache hit" >&2
+  fi
+
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "export_needed=${export_needed}" >> "$GITHUB_OUTPUT"
+  else
+    echo "export_needed=${export_needed}"
+  fi
 }
 
 prepare_export() {
@@ -608,22 +553,10 @@ prepare_export() {
   checkout_modpack
   prepare_bundle_id
   print_versions
-  echo "Modpack-Modern @ ${MODPACK_TAG} → bundle_id=tfg-${MODPACK_TAG}"
 }
 
 resolve_export_languages() {
-  local lang_cfg="$RBM_ROOT/language.json"
-  if [[ ! -f "$lang_cfg" ]]; then
-    echo "en_us,zh_cn"
-    return
-  fi
-  node -e "
-const fs=require('fs');
-const cfg=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
-const arr=Array.isArray(cfg.enabledLocales)?cfg.enabledLocales:[];
-const norm=[...new Set(arr.map(s=>String(s||'').trim().toLowerCase().replace(/-/g,'_')).filter(Boolean))];
-process.stdout.write((norm.length?norm:['en_us','zh_cn']).join(','));
-" "$lang_cfg"
+  ci_node resolve-export-languages.mjs "$RBM_ROOT/language.json"
 }
 
 export_languages() {
@@ -765,7 +698,7 @@ verify_emi_bundle() {
   fi
 
   local schema
-  schema="$(node -e "const b=require(process.argv[1]); console.log(b.schema??'')" "$bundle_json")"
+  schema="$(ci_node read-bundle-field.mjs "$bundle_json" schema)"
   if [[ "$schema" != "2" ]]; then
     echo "::error::bundle.json schema must be 2 (got: ${schema:-<missing>})." >&2
     return 1
@@ -824,7 +757,7 @@ finalize_export() {
   local subdir="${EXPORT_BUNDLE_SUBDIR:-emi}"
 
   load_config
-  node -e "const b=require(process.argv[1]); console.log('bundle.json schema', b.schema, 'imageScale', b.imageScale)" "${EXPORT_BUNDLE}/bundle.json"
+  echo "bundle.json schema $(ci_node read-bundle-field.mjs "${EXPORT_BUNDLE}/bundle.json" schema) imageScale $(ci_node read-bundle-field.mjs "${EXPORT_BUNDLE}/bundle.json" imageScale)"
   tar -czf "$archive" -C "${EXPORT_RAW}" "$subdir"
   ls -lh "$archive"
 }
@@ -895,7 +828,7 @@ resolve_bundle_id() {
   elif [[ -f "$RBM_ROOT/export-meta/bundle-id" ]]; then
     id="$(tr -d '\r\n' < "$RBM_ROOT/export-meta/bundle-id")"
   elif [[ -n "${MODPACK_TAG:-}" ]]; then
-    id="tfg-${MODPACK_TAG}"
+    id="$(bundle_id_for_tag "$MODPACK_TAG")"
   else
     load_config
     if [[ -z "${MODPACK_TAG:-}" ]]; then
@@ -906,30 +839,22 @@ resolve_bundle_id() {
       echo "::error::Could not resolve modpack tag for bundle id" >&2
       exit 1
     fi
-    id="tfg-${tag}"
+    id="$(bundle_id_for_tag "$tag")"
     export MODPACK_TAG="$tag"
   fi
 
   export BUNDLE_ID="$id"
 
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    echo "bundle_id=${id}" >> "$GITHUB_OUTPUT"
+    {
+      echo "bundle_id=${id}"
+      echo "export_cache_key=$(export_cache_key "$id")"
+    } >> "$GITHUB_OUTPUT"
   fi
   if [[ -n "${GITHUB_ENV:-}" ]]; then
     printf 'BUNDLE_ID=%s\n' "$id" >> "$GITHUB_ENV"
   fi
-  echo "bundle_id=${id}"
-}
-
-install_bundle() {
-  case "${ACQUIRE:-extract}" in
-    extract) extract_bundle ;;
-    fetch) fetch_bundle ;;
-    *)
-      echo "::error::ACQUIRE must be extract or fetch (got: ${ACQUIRE:-})" >&2
-      exit 1
-      ;;
-  esac
+  echo "deploy bundle_id=${id} export_cache_key=$(export_cache_key "$id")"
 }
 
 extract_bundle() {
@@ -942,7 +867,7 @@ extract_bundle() {
   load_config
 
   if [[ ! -f "$archive" ]]; then
-    echo "::error::Missing ${archive} after artifact download" >&2
+    echo "::error::Missing ${archive} after export cache restore" >&2
     ls -la "$RBM_ROOT" >&2
     exit 1
   fi
@@ -961,50 +886,9 @@ extract_bundle() {
   rm -rf "$RBM_ROOT/emi" "$archive"
 
   local schema image_scale
-  schema="$(node -e "const b=require(process.argv[1]); console.log(b.schema??'')" "${dest}/bundle.json")"
-  image_scale="$(node -e "const b=require(process.argv[1]); console.log(b.imageScale??'')" "${dest}/bundle.json")"
+  schema="$(ci_node read-bundle-field.mjs "${dest}/bundle.json" schema)"
+  image_scale="$(ci_node read-bundle-field.mjs "${dest}/bundle.json" imageScale)"
   echo "Raw bundle at ${dest}/bundle.json (schema=${schema} imageScale=${image_scale})"
-}
-
-fetch_bundle() {
-  local bundle_id="${BUNDLE_ID:?BUNDLE_ID required}"
-
-  load_config
-
-  if [[ -f "${EXPORT_BUNDLE}/bundle.json" ]]; then
-    echo "Raw bundle already at ${EXPORT_BUNDLE}"
-    return 0
-  fi
-
-  if ! command -v gh >/dev/null 2>&1; then
-    echo "::error::gh CLI required to download artifact ${EXPORT_ARTIFACT_NAME}" >&2
-    exit 1
-  fi
-
-  local artifact_name="${EXPORT_ARTIFACT_NAME:-recipe-book}"
-  local workflow_name="${EXPORT_WORKFLOW_NAME:-Build recipe book}"
-
-  local run_id
-  run_id="$(
-    gh run list \
-      --repo "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}" \
-      --workflow "$workflow_name" \
-      --branch "${GITHUB_REF_NAME:-main}" \
-      --status success \
-      --limit 1 \
-      --json databaseId \
-      -q '.[0].databaseId'
-  )"
-
-  if [[ -z "$run_id" ]]; then
-    echo "::error::No successful「${workflow_name}」run on branch ${GITHUB_REF_NAME:-main}" >&2
-    exit 1
-  fi
-
-  rm -f "$RBM_ROOT/emi-raw-${bundle_id}.tar.gz"
-  gh run download "$run_id" --repo "$GITHUB_REPOSITORY" -n "$artifact_name" -D "$RBM_ROOT"
-  extract_bundle
-  echo "Installed export from run ${run_id} (artifact ${artifact_name})"
 }
 
 fetch_viewer_site() {
@@ -1148,13 +1032,14 @@ Workflow composites:
   prepare-game        xvfb deps + MWE jar + HeadlessMC
   finalize-export     export-meta + tar (needs BUNDLE_ID, MODPACK_TAG)
   prepare-deploy      env + resolve bundle id
-  install-bundle      extract or fetch (ACQUIRE=extract|fetch, BUNDLE_ID)
-  build-site            fetch React site + optimize bundle + assemble deploy site
+  extract-bundle      unpack export cache (BUNDLE_ID)
+  build-site          fetch React site + optimize bundle + assemble deploy site
 
 Granular (local debugging):
   env, print-versions, checkout-modpack, prepare-bundle-id, export-languages,
   prep-node, install-mods, setup-hmc, launch-export, write-export-meta,
-  resolve-bundle-id, extract-bundle, fetch-bundle, verify-emi-bundle,
+  resolve-bundle-id, extract-bundle, verify-emi-bundle,
+  prepare-check-bundle, finalize-export-decision,
   fetch-viewer-site, optimize-and-stage, assemble-deploy-site,
   collect-export-debug, resolve-release-tag,
   check-build-changes, record-build-versions, publish-site-release
@@ -1176,9 +1061,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     prepare-game) prepare_game "$@" ;;
     finalize-export) finalize_export "$@" ;;
     prepare-deploy) prepare_deploy "$@" ;;
-    install-bundle) install_bundle "$@" ;;
+    extract-bundle) extract_bundle "$@" ;;
     checkout-modpack) checkout_modpack "$@" ;;
     prepare-bundle-id) prepare_bundle_id "$@" ;;
+    prepare-check-bundle) prepare_check_bundle "$@" ;;
+    finalize-export-decision) finalize_export_decision "$@" ;;
     export-languages) export_languages "$@" ;;
     prep-node) prep_node "$@" ;;
     install-mods) install_mwe "$@" ;;
@@ -1187,7 +1074,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     write-export-meta) write_export_meta "$@" ;;
     resolve-bundle-id) resolve_bundle_id "$@" ;;
     extract-bundle) extract_bundle "$@" ;;
-    fetch-bundle) fetch_bundle "$@" ;;
     verify-emi-bundle) verify_emi_bundle "$@" ;;
     fetch-viewer-site) fetch_viewer_site "$@" ;;
     optimize-and-stage) optimize_and_stage "$@" ;;

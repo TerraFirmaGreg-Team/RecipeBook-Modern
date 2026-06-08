@@ -1,0 +1,260 @@
+name: Build recipe book
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  push:
+    branches: ["main"]
+    paths:
+      - "ci/**"
+      - "language.json"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/**"
+      - ".github/workflows/build-recipe-book.yml"
+  workflow_dispatch:
+    inputs:
+      modpack_tag:
+        description: Modpack-Modern release tag
+        required: false
+        default: ""
+      mwe_version:
+        description: minecraft-web-export release tag
+        required: false
+        default: ""
+      bundle_id:
+        description: Export bundle id (deploy only)
+        required: false
+        default: ""
+
+concurrency:
+  group: recipe-book-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      export_needed: ${{ steps.changes.outputs.export_needed }}
+      deploy_needed: ${{ steps.changes.outputs.deploy_needed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check build.json
+        id: changes
+        env:
+          MODPACK_TAG: ${{ github.event.inputs.modpack_tag }}
+          MWE_TAG: ${{ github.event.inputs.mwe_version }}
+        run: bash ci/run.sh check-build-changes
+
+  export:
+    needs: check
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.check.outputs.export_needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Prepare export
+        id: metadata
+        env:
+          MODPACK_TAG: ${{ github.event.inputs.modpack_tag }}
+          MWE_TAG: ${{ github.event.inputs.mwe_version }}
+        run: bash ci/run.sh prepare-export
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Prep Node
+        run: bash ci/run.sh prep-node
+
+      - name: Export languages
+        id: export_languages
+        run: bash ci/run.sh export-languages
+
+      - name: Fetch mods
+        working-directory: ${{ env.MODPACK_DIR }}
+        run: java -jar pakku.jar fetch
+
+      - name: Restore HMC cache
+        id: hmc-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.RUNNER_HOME }}/.minecraft
+          key: hmc-${{ env.MC_VERSION }}-forge-${{ env.FORGE_BUILD }}
+          restore-keys: |
+            hmc-${{ env.MC_VERSION }}-forge-
+            hmc-${{ env.MC_VERSION }}-
+
+      - name: Restore world cache
+        id: world-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.MODPACK_DIR }}/saves/emi-export
+          key: emi-export-${{ env.MC_VERSION }}-${{ hashFiles(format('{0}/pakku-lock.json', env.MODPACK_DIR)) }}
+          restore-keys: emi-export-${{ env.MC_VERSION }}-
+
+      - name: Prepare game
+        run: bash ci/run.sh prepare-game
+
+      - name: Run export
+        env:
+          ALSOFT_DRIVERS: "null"
+          MWE_JVM_FLAGS: >-
+            -Xmx12G
+            -Xms4G
+            -XX:+UseG1GC
+            -Djava.awt.headless=false
+            -Dmodernfix.config.mixin.feature.integrated_server_watchdog=false
+            -DminecraftWebExport.export.enabled=true
+            -DminecraftWebExport.runExportAndExit=true
+            -DminecraftWebExport.export.outputDir=${{ env.EXPORT_RAW }}
+            -DminecraftWebExport.exportWarmupTicks=${{ env.EXPORT_WARMUP_TICKS }}
+            -DminecraftWebExport.exportTimeoutSeconds=${{ env.EXPORT_TIMEOUT_SECONDS }}
+            -DminecraftWebExport.exportLanguages=${{ steps.export_languages.outputs.export_languages }}
+        run: bash ci/run.sh launch-export
+
+      - name: Save world cache
+        if: success() && steps.world-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.MODPACK_DIR }}/saves/emi-export
+          key: ${{ steps.world-restore.outputs.cache-primary-key }}
+
+      - name: Save HMC cache
+        if: success() && steps.hmc-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.RUNNER_HOME }}/.minecraft
+          key: ${{ steps.hmc-restore.outputs.cache-primary-key }}
+
+      - name: Package export
+        env:
+          BUNDLE_ID: ${{ steps.metadata.outputs.bundle_id }}
+          MODPACK_TAG: ${{ steps.metadata.outputs.modpack_tag }}
+        run: bash ci/run.sh finalize-export
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EXPORT_ARTIFACT_NAME }}
+          path: |
+            export-meta/
+            emi-raw-${{ steps.metadata.outputs.bundle_id }}.tar.gz
+          retention-days: 90
+          compression-level: 0
+
+      - name: Collect debug
+        if: failure()
+        run: bash ci/run.sh collect-export-debug
+
+      - name: Upload debug
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-debug
+          path: ci-debug/
+          if-no-files-found: ignore
+
+  deploy:
+    needs: [check, export]
+    if: >-
+      always() &&
+      needs.export.result != 'failure' &&
+      needs.export.result != 'cancelled' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'push' ||
+        needs.check.outputs.deploy_needed == 'true'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Load config
+        run: bash ci/run.sh env
+
+      - name: Download bundle from export
+        if: needs.export.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.EXPORT_ARTIFACT_NAME }}
+
+      - name: Resolve bundle
+        id: metadata
+        env:
+          BUNDLE_ID_INPUT: ${{ github.event.inputs.bundle_id }}
+          MODPACK_TAG: ${{ github.event.inputs.modpack_tag }}
+        run: bash ci/run.sh prepare-deploy
+
+      - name: Resolve versions
+        run: bash ci/run.sh print-versions
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install bundle
+        env:
+          BUNDLE_ID: ${{ steps.metadata.outputs.bundle_id }}
+          ACQUIRE: ${{ needs.export.result == 'success' && 'extract' || 'fetch' }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: bash ci/run.sh install-bundle
+
+      - name: Build site
+        env:
+          BUNDLE_ID: ${{ steps.metadata.outputs.bundle_id }}
+        run: bash ci/run.sh build-site
+
+      - name: Record build versions
+        run: bash ci/run.sh record-build-versions
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ env.SITE_OUTPUT_DIR }}
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

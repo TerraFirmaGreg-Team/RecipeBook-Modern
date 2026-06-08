@@ -1,0 +1,9 @@
+build.json
+
+node_modules/
+site/bundles/**
+!site/bundles/.gitkeep
+export-raw/
+export-opt/
+emi-bundle-optimize/
+.DS_Store

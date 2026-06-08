@@ -85,8 +85,12 @@ jobs:
     if: needs.check.outputs.export_needed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    outputs:
+      export_cache_key: ${{ steps.metadata.outputs.export_cache_key }}
+      bundle_id: ${{ steps.metadata.outputs.bundle_id }}
     permissions:
       contents: read
+      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -244,8 +248,10 @@ jobs:
         id: export_cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ github.workspace }}
-          key: ${{ steps.metadata.outputs.export_cache_key }}
+          path: |
+            export-meta/
+            emi-raw-${{ steps.metadata.outputs.bundle_id }}.tar.gz
+          key: ${{ needs.export.outputs.export_cache_key || steps.metadata.outputs.export_cache_key }}
           fail-on-cache-miss: true
 
       - name: Resolve versions

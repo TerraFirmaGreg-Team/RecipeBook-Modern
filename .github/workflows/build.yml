@@ -36,48 +36,49 @@ concurrency:
   group: recipe-book-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       export_needed: ${{ steps.decision.outputs.export_needed }}
-      deploy_needed: ${{ steps.changes.outputs.deploy_needed }}
+      deploy_needed: ${{ steps.gates.outputs.deploy_needed }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
-      - name: Load config
-        run: bash ci/run.sh env
-
-      - name: Resolve bundle for cache probe
-        id: bundle
-        env:
-          MODPACK_TAG: ${{ github.event.inputs.modpack_tag }}
-        run: bash ci/run.sh prepare-check-bundle
-
-      - name: Check build.json
-        id: changes
+      - name: Check gates
+        id: gates
         env:
           MODPACK_TAG: ${{ github.event.inputs.modpack_tag }}
           MWE_TAG: ${{ github.event.inputs.mwe_version }}
           FORCE_EXPORT: ${{ github.event.inputs.force_export }}
-        run: bash ci/run.sh check-build-changes
+        run: bash ci/run.sh check-gates
 
       - name: Probe export cache
         id: export_cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
-          path: .export-cache-probe
-          key: ${{ steps.bundle.outputs.export_cache_key }}
+          path: |
+            export-meta/
+            emi-raw-${{ steps.gates.outputs.bundle_id }}.tar.gz
+          key: ${{ steps.gates.outputs.export_cache_key }}
           lookup-only: true
 
       - name: Finalize export decision
         id: decision
         env:
-          VERSION_EXPORT_NEEDED: ${{ steps.changes.outputs.export_needed }}
+          VERSION_EXPORT_NEEDED: ${{ steps.gates.outputs.version_export_needed }}
           EXPORT_CACHE_HIT: ${{ steps.export_cache.outputs.cache-hit }}
-          EXPORT_CACHE_KEY: ${{ steps.bundle.outputs.export_cache_key }}
+          EXPORT_CACHE_KEY: ${{ steps.gates.outputs.export_cache_key }}
         run: bash ci/run.sh finalize-export-decision
 
   export:
@@ -94,7 +95,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
@@ -112,7 +113,7 @@ jobs:
           distribution: temurin
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -131,7 +132,7 @@ jobs:
 
       - name: Restore HMC cache
         id: hmc-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.RUNNER_HOME }}/.minecraft
           key: hmc-${{ env.MC_VERSION }}-forge-${{ env.FORGE_BUILD }}
@@ -141,7 +142,7 @@ jobs:
 
       - name: Restore world cache
         id: world-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.MODPACK_DIR }}/saves/emi-export
           key: emi-export-${{ env.MC_VERSION }}-${{ hashFiles(format('{0}/pakku-lock.json', env.MODPACK_DIR)) }}
@@ -169,14 +170,14 @@ jobs:
 
       - name: Save world cache
         if: success() && steps.world-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.MODPACK_DIR }}/saves/emi-export
           key: ${{ steps.world-restore.outputs.cache-primary-key }}
 
       - name: Save HMC cache
         if: success() && steps.hmc-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.RUNNER_HOME }}/.minecraft
           key: ${{ steps.hmc-restore.outputs.cache-primary-key }}
@@ -188,7 +189,7 @@ jobs:
         run: bash ci/run.sh finalize-export
 
       - name: Save export cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             export-meta/
@@ -230,7 +231,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
@@ -246,7 +247,7 @@ jobs:
 
       - name: Restore export cache
         id: export_cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             export-meta/
@@ -258,7 +259,7 @@ jobs:
         run: bash ci/run.sh print-versions
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm

@@ -161,7 +161,6 @@ jobs:
             -Djava.awt.headless=false
             -Dmodernfix.config.mixin.feature.integrated_server_watchdog=false
             -DminecraftWebExport.export.enabled=true
-            -DminecraftWebExport.runExportAndExit=true
             -DminecraftWebExport.export.outputDir=${{ env.EXPORT_RAW }}
             -DminecraftWebExport.exportWarmupTicks=${{ env.EXPORT_WARMUP_TICKS }}
             -DminecraftWebExport.exportTimeoutSeconds=${{ env.EXPORT_TIMEOUT_SECONDS }}

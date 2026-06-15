@@ -889,7 +889,21 @@ EOF
   fi
 }
 
+materialize_emi_bundle() {
+  local raw="${1:-${EXPORT_RAW:?EXPORT_RAW required}}"
+  local zip="$raw/emi.zip"
+  if [[ ! -f "$zip" ]]; then
+    return 0
+  fi
+  rm -rf "$raw/emi"
+  mkdir -p "$raw/emi"
+  unzip -q -o "$zip" -d "$raw/emi"
+  rm -f "$zip"
+}
+
 verify_emi_bundle() {
+  load_config
+  materialize_emi_bundle
   local bundle="${EXPORT_BUNDLE:?EXPORT_BUNDLE required}"
   local bundle_json="$bundle/bundle.json"
 
@@ -958,8 +972,14 @@ finalize_export() {
   local subdir="${EXPORT_BUNDLE_SUBDIR:-emi}"
 
   load_config
-  echo "bundle.json schema $(ci_node read-bundle-field.mjs "${EXPORT_BUNDLE}/bundle.json" schema) imageScale $(ci_node read-bundle-field.mjs "${EXPORT_BUNDLE}/bundle.json" imageScale)"
-  tar -czf "$archive" -C "${EXPORT_RAW}" "$subdir"
+  if [[ -f "${EXPORT_RAW}/emi.zip" ]]; then
+    ls -lh "${EXPORT_RAW}/emi.zip"
+    tar -czf "$archive" -C "${EXPORT_RAW}" emi.zip
+  else
+    materialize_emi_bundle
+    echo "bundle.json schema $(ci_node read-bundle-field.mjs "${EXPORT_BUNDLE}/bundle.json" schema) imageScale $(ci_node read-bundle-field.mjs "${EXPORT_BUNDLE}/bundle.json" imageScale)"
+    tar -czf "$archive" -C "${EXPORT_RAW}" "$subdir"
+  fi
   ls -lh "$archive"
 }
 
@@ -1077,8 +1097,10 @@ extract_bundle() {
     exit 1
   fi
 
-  rm -rf "$RBM_ROOT/emi"
+  rm -rf "$RBM_ROOT/emi" "$RBM_ROOT/emi.zip"
   tar -xzf "$archive" -C "$RBM_ROOT"
+
+  materialize_emi_bundle "$RBM_ROOT"
 
   if [[ ! -f "$RBM_ROOT/emi/bundle.json" ]]; then
     echo "::error::${archive} did not contain emi/bundle.json" >&2

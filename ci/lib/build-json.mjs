@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 export const VERSION_KEYS = [
   'modpack',
   'minecraft-web-export',
-  'recipe-viewer-react',
+  'recipe-book-react',
   'emi-recipe-renderer',
   'emi-bundle-optimize',
   'headlessmc',

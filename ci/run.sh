@@ -101,7 +101,7 @@ resolve_mwe_tag() {
 
 resolve_site_viewer_version() {
   resolve_github_release_version \
-    "${SITE_VIEWER_REPO:-jmecn/TFG-Recipe-Viewer-React}" \
+    "${SITE_VIEWER_REPO:-jmecn/RecipeBook-React}" \
     "${SITE_VIEWER_VER:-${SITE_VIEWER_VERSION:-}}"
 }
 
@@ -174,7 +174,7 @@ load_config() {
       printf 'RENDERER_VERSION=%s\n' "${RENDERER_VERSION:-}"
       printf 'OPTIMIZE_REPO=%s\n' "${OPTIMIZE_REPO:-jmecn/emi-bundle-optimize}"
       printf 'OPTIMIZE_VERSION=%s\n' "${OPTIMIZE_VERSION:-}"
-      printf 'SITE_VIEWER_REPO=%s\n' "${SITE_VIEWER_REPO:-jmecn/TFG-Recipe-Viewer-React}"
+      printf 'SITE_VIEWER_REPO=%s\n' "${SITE_VIEWER_REPO:-jmecn/RecipeBook-React}"
       printf 'SITE_VIEWER_VERSION=%s\n' "${SITE_VIEWER_VERSION:-}"
       printf 'EXPORT_WARMUP_TICKS=%s\n' "$EXPORT_WARMUP_TICKS"
       printf 'EXPORT_TIMEOUT_SECONDS=%s\n' "$EXPORT_TIMEOUT_SECONDS"
@@ -620,7 +620,7 @@ print_versions() {
       echo "| Modpack-Modern | \`${modpack}\` |"
       echo "| Bundle id | \`${bundle_id}\` |"
       echo "| minecraft-web-export | \`${mwe}\` |"
-      echo "| TFG-Recipe-Viewer-React | \`v${site}\` |"
+      echo "| RecipeBook-React | \`v${site}\` |"
       echo "| emi-recipe-renderer | \`${renderer}\` |"
       echo "| emi-bundle-optimize | \`${optimize}\` |"
       echo "| HeadlessMC | \`${hmc}\` |"
@@ -1119,12 +1119,12 @@ extract_bundle() {
 }
 
 fetch_viewer_site() {
-  local repo="${SITE_VIEWER_REPO:-jmecn/TFG-Recipe-Viewer-React}"
+  local repo="${SITE_VIEWER_REPO:-jmecn/RecipeBook-React}"
   local site_dir="${RBM_ROOT}/${SITE_OUTPUT_DIR:-site}"
   local version tag
 
   version="$(resolve_site_viewer_version)" || return 1
-  echo "TFG-Recipe-Viewer-React site @ v${version}"
+  echo "RecipeBook-React site @ v${version}"
   tag="v${version}"
 
   if ! command -v gh >/dev/null 2>&1; then
@@ -1134,7 +1134,7 @@ fetch_viewer_site() {
 
   local staging archive
   staging="$(mktemp -d)"
-  archive="tfg-recipe-viewer-site-v${version}.tar.gz"
+  archive="recipe-book-react-site-v${version}.tar.gz"
 
   echo "::group::Fetch viewer site ${tag} (${repo})"
   if ! ( cd "$staging" && gh release download "$tag" --repo "$repo" --pattern "$archive" --clobber ); then
